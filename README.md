@@ -7,6 +7,15 @@ scoring, and produces a human-readable Markdown summary. The LLM layer is
 vendor-neutral — pipeline code never imports the Anthropic SDK directly, so
 swapping providers or models is a config change rather than a refactor.
 
+> **Build context:** ~1.5 hours wall-clock as a take-home submission, built
+> with AI-assisted parallel agent execution (Claude Code orchestrating
+> sub-agents per phase). The brief's "Recommended Scope" suggested 45-60
+> minutes for implementation; the extra time was spent on the upgrades
+> beyond the brief minimum — hybrid regex + LLM extraction, OCR fallback,
+> source-grounded validation, 28 tests, mini eval harness, vendor-neutral
+> LLM abstraction, and the design rationale doc. Every design decision in
+> the rationale is a defensible technical choice, not a tool output.
+
 ## Quick Start
 
 ### Prerequisites
