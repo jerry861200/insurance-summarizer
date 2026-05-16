@@ -1,0 +1,18 @@
+{
+  "case_name": "leland_stanford",
+  "pdf_filename": "leland_stanford.pdf",
+  "description": "Pacific Life term life insurance policy for Leland Stanford. 14-page native PDF.",
+  "expected": {
+    "policy_number": "VF99999990",
+    "insured_name": "LELAND STANFORD",
+    "insurer_name": "Pacific Life Insurance Company",
+    "policy_type": "Term Life",
+    "effective_date": "2008-05-01",
+    "expiration_date": "2068-05-01",
+    "premium_amount": 36.00,
+    "premium_frequency": "monthly",
+    "premium_currency": "USD",
+    "face_amount": 500000.00,
+    "exclusions_must_include_substrings": ["suicide", "2 years"]
+  }
+}
