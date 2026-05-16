@@ -1,0 +1,18 @@
+[project]
+name = "insurance-summarizer"
+version = "0.1.0"
+description = "Intelligent insurance document summarizer — extract structured fields and human-readable summaries from policy PDFs"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
