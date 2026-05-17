@@ -1,0 +1,18 @@
+{
+  "case_name": "auto_multi_vehicle",
+  "pdf_filename": "auto_multi_vehicle.pdf",
+  "description": "Synthetic personal auto policy from a fictional 'Midwest Auto & Property Insurance' covering two vehicles (2020 Honda Civic, 2018 Toyota Camry). Tests multi-row coverage_limits, semi-annual premium frequency, and non-life exclusions (racing, uninsured drivers, intentional acts).",
+  "expected": {
+    "policy_number": "PA-2024-887766",
+    "insured_name": "Maria Gonzalez",
+    "insurer_name": "Midwest Auto & Property Insurance",
+    "policy_type": "Personal Auto",
+    "effective_date": "2024-06-01",
+    "expiration_date": "2024-12-01",
+    "premium_amount": 920.00,
+    "premium_frequency": "semi-annual",
+    "premium_currency": "USD",
+    "face_amount": null,
+    "exclusions_must_include_substrings": ["racing", "uninsured", "intentional"]
+  }
+}

@@ -1,0 +1,41 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs (we install via requirements.txt inside the image)
+venv/
+.venv/
+
+# Local SQLite DBs (the container creates its own)
+*.db
+*.db-journal
+
+# Uploaded PDFs (mounted as a volume in docker-compose; don't bake them in)
+storage/pdfs/*
+!storage/pdfs/.gitkeep
+
+# Secrets — supplied via env_file at runtime, not baked into image
+.env
+.env.local
+
+# Git metadata
+.git/
+.gitignore
+
+# IDE / OS junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude / agent scratch space
+.claude/
+
+# Build output
+dist/
+build/

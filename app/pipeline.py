@@ -38,6 +38,13 @@ try:
 except ImportError:
     _VALIDATE_AVAILABLE = False
 
+try:
+    from app.extractors.llm.verifier import verify_extraction  # type: ignore
+
+    _VERIFIER_AVAILABLE = True
+except ImportError:
+    _VERIFIER_AVAILABLE = False
+
 
 def process(
     file_bytes: bytes,
@@ -116,6 +123,56 @@ def process(
         result: ExtractionResult = llm.extract_fields(full_text)
         completed = datetime.now(timezone.utc)
 
+        # 2b. Optional cross-model verification (opt-in via CROSS_MODEL_VERIFY=true).
+        # Runs the OTHER provider on the same text and surfaces scalar-field
+        # disagreements as warning-severity ValidationWarnings later. Failure
+        # is non-fatal: we emit an info-level warning and continue.
+        cross_model_warnings: list = []
+        if (
+            _VERIFIER_AVAILABLE
+            and settings.cross_model_verify
+            and settings.anthropic_api_key
+            and settings.openai_api_key
+        ):
+            try:
+                from app.extractors.llm import get_llm_provider
+
+                # Construct the OTHER provider via a mutated Settings copy.
+                secondary_provider_name = (
+                    "openai"
+                    if settings.llm_provider == "anthropic"
+                    else "anthropic"
+                )
+                secondary_settings = settings.model_copy(
+                    update={"llm_provider": secondary_provider_name}
+                )
+                secondary = get_llm_provider(secondary_settings)
+
+                disagreements = verify_extraction(result, full_text, secondary)
+                for d in disagreements:
+                    cross_model_warnings.append(
+                        _SimpleWarning(
+                            field_name=d.field_name,
+                            severity="warning",
+                            message=(
+                                f"Cross-model disagreement: "
+                                f"primary={d.primary_value!r}, "
+                                f"secondary={d.secondary_value!r}"
+                            ),
+                        )
+                    )
+            except Exception as e:
+                cross_model_warnings.append(
+                    _SimpleWarning(
+                        field_name=None,
+                        severity="info",
+                        message=(
+                            f"Cross-model verification skipped: "
+                            f"{type(e).__name__}: {e}"
+                        ),
+                    )
+                )
+
         # 3. Merge — regex wins on overlap
         merged_fields, origin_per_field = merge_with_llm(
             regex_fields, result.fields
@@ -184,6 +241,17 @@ def process(
 
         # Persist validation warnings
         for w in validation_warnings:
+            db.add(
+                ValidationWarning(
+                    processing_run_id=run.id,
+                    field_name=getattr(w, "field_name", None),
+                    severity=getattr(w, "severity", "info"),
+                    message=getattr(w, "message", ""),
+                )
+            )
+
+        # Persist cross-model verification warnings (if any)
+        for w in cross_model_warnings:
             db.add(
                 ValidationWarning(
                     processing_run_id=run.id,

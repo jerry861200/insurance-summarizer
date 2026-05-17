@@ -22,6 +22,7 @@ from app.schemas import (
     DocumentListItem,
     DocumentResponse,
     ExtractedFieldsSchema,
+    ValidationWarningSchema,
 )
 from app.storage import get_db
 
@@ -332,6 +333,10 @@ def _document_to_response(doc: Document) -> DocumentResponse:
     run_id = None
     prompt_versions: dict[str, str] = {}
     model_id = None
+    confidence: dict[str, float] = {}
+    extraction_method_per_field: dict[str, str] = {}
+    source_page_hints: dict[str, list[int]] = {}
+    warnings: list[ValidationWarningSchema] = []
 
     if latest_run is not None:
         run_id = latest_run.id
@@ -367,6 +372,57 @@ def _document_to_response(doc: Document) -> DocumentResponse:
                 exclusions=exclusions,
             )
 
+            # Populate confidence from confidence_json
+            if ef.confidence_json:
+                try:
+                    parsed = json.loads(ef.confidence_json)
+                    if isinstance(parsed, dict):
+                        confidence = {
+                            str(k): float(v)
+                            for k, v in parsed.items()
+                            if isinstance(v, (int, float))
+                        }
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # Populate extraction_method_per_field from extraction_method_per_field_json
+            if ef.extraction_method_per_field_json:
+                try:
+                    parsed = json.loads(ef.extraction_method_per_field_json)
+                    if isinstance(parsed, dict):
+                        extraction_method_per_field = {
+                            str(k): str(v) for k, v in parsed.items()
+                        }
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # Populate source_page_hints from raw_extraction_json["_source_page_hints"]
+            if ef.raw_extraction_json:
+                try:
+                    raw = json.loads(ef.raw_extraction_json)
+                    hints = raw.get("_source_page_hints") if isinstance(raw, dict) else None
+                    if isinstance(hints, dict):
+                        normalized: dict[str, list[int]] = {}
+                        for k, v in hints.items():
+                            if isinstance(v, list):
+                                pages = [int(p) for p in v if isinstance(p, (int, float))]
+                                if pages:
+                                    normalized[str(k)] = pages
+                        source_page_hints = normalized
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+        # Populate validation warnings from the ProcessingRun.validation_warnings relationship
+        for w in latest_run.validation_warnings:
+            severity = w.severity if w.severity in ("info", "warning", "error") else "info"
+            warnings.append(
+                ValidationWarningSchema(
+                    field=w.field_name,
+                    severity=severity,
+                    message=w.message or "",
+                )
+            )
+
         if latest_run.summary is not None:
             summary_md = latest_run.summary.summary_markdown
 
@@ -378,8 +434,11 @@ def _document_to_response(doc: Document) -> DocumentResponse:
         page_count=doc.page_count,
         extraction_method=doc.extraction_method,
         extracted_fields=extracted,
+        confidence=confidence,
+        extraction_method_per_field=extraction_method_per_field,
+        source_page_hints=source_page_hints,
         summary_markdown=summary_md,
-        warnings=[],
+        warnings=warnings,
         processing_run_id=run_id,
         prompt_versions=prompt_versions,
         model_id=model_id,

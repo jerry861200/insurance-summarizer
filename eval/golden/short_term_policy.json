@@ -1,0 +1,18 @@
+{
+  "case_name": "short_term_policy",
+  "pdf_filename": "short_term_policy.pdf",
+  "description": "Synthetic 2-page term life policy from a fictional 'Consolidated Mutual Life'. Uses different field labels than Pacific Life sample ('Policy No.' vs 'Policy Number', 'Annual Premium' explicit) to test format-variety robustness.",
+  "expected": {
+    "policy_number": "ABC-456789",
+    "insured_name": "Jane Doe",
+    "insurer_name": "Consolidated Mutual Life Insurance Company",
+    "policy_type": "Term Life",
+    "effective_date": "2023-01-15",
+    "expiration_date": "2043-01-15",
+    "premium_amount": 480.00,
+    "premium_frequency": "annual",
+    "premium_currency": "USD",
+    "face_amount": 250000.00,
+    "exclusions_must_include_substrings": ["suicide", "2 years"]
+  }
+}
