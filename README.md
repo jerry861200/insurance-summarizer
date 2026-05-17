@@ -117,6 +117,104 @@ source-grounded validation -> persist to SQLite -> LLM summary -> JSON
 response. See [docs/architecture.md](docs/architecture.md) for the per-module
 breakdown, database schema, and request lifecycle.
 
+## Interview Presentation (60-min flow)
+
+The verbal frame I'd use to walk an interviewer through this project — what
+I'd ask, frame, decide, and proactively raise. Every claim ties back to a
+specific path in this repo.
+
+### 1. Questions I'd ask before designing
+
+Senior move: don't draw the architecture cold. Pin down 4 things that
+materially change the shape:
+
+1. **Volume:** 10/day or 100k/day? → sync vs async; SQLite vs Postgres.
+2. **Latency tolerance:** result inline, or "we'll email you in 5 min"? → 201 immediate vs 202 + poll.
+3. **Document mix:** native PDFs or scan-heavy? → OCR is fallback vs primary path.
+4. **Downstream consumer:** human broker UI, or feeding a CRM / underwriting engine? → schema rigor + retry semantics.
+
+If the interviewer waves them off: "I'll assume <100/day, sub-minute is fine,
+native-mostly, human-facing UI" — and design from there. Every decision below
+is **conditional** on those assumptions; flip an assumption, multiple
+decisions flip with it.
+
+### 2. The problem isn't "PDF → JSON" — it's three things
+
+1. **Hallucination is a legal risk, not a UX bug.** A wrong `premium_amount` becomes a wrong number on a broker's screen, which becomes the wrong figure in a quote. The whole system is shaped around "always verify, always trace back to source."
+2. **Exclusions are nested legal text, not a scalar.** Format varies by insurer; exact-match scoring is brittle. We store them as `list[str]` and score with LLM-as-judge in eval (v3) — not exact-match.
+3. **Documents are heterogeneous.** Different insurers, different layouts, different field labels. Pure regex doesn't scale; pure LLM hallucinates on novel formats. → Hybrid (D1).
+
+### 3. Why 2 LLM calls, not 3 or 1
+
+The "3 targeted calls" pattern (fields / exclusions / summary) is a defensible
+senior answer. We chose **2 calls** — one combined extraction (fields + exclusions
++ coverage_limits via Anthropic `tool_use`) plus one summary:
+
+| | 1 mega-call | **2 (ours)** | 3 targeted |
+|---|---|---|---|
+| API cost | 1× | 2× | 3× |
+| Reliability — one call fails, others survive | ❌ | ✅ | ✅ |
+| Schema enforcement | one giant schema | one focused tool-use schema | three small schemas |
+| Summary contamination from extraction prompt | yes | no | no |
+| Debug "which step broke?" | hard | easy | easiest |
+
+Why bundle exclusions WITH fields (not as a third call):
+
+- `tool_use` (D7) enforces schema at the API layer — one `save_policy_fields` tool with `exclusions: array<string>` is the same reliability story as a separate call, at ~1/3× the latency.
+- A third call would re-feed the same several-thousand-token `full_text` to the LLM for zero quality gain on the current 6 eval cases.
+- v3's LLM-as-judge (`eval/judge.py`) gives **semantic** scoring on exclusions — they're evaluated as a free-text field even though they're extracted in the same call.
+
+### 4. Hallucination defense — two layers shipped, third behind a flag
+
+1. **Source-grounding validation** (`app/validate.py`): every non-null scalar field is re-checked against `full_text` with normalized money/date candidates (`$500,000` ≡ `500000` ≡ `500,000.00`). Fields that don't ground → severity-warning + confidence drops to 0.55.
+2. **Per-field confidence + origin tracking**: the response carries `confidence[field]` and `extraction_method_per_field[field]` (`regex` / `llm` / `merged`) so the consumer sees provenance, not just the value. v3 also exposes `source_page_hints[field]` for "📄 p.N" UI badges.
+3. **Cross-model verifier** (v3, `app/extractors/llm/verifier.py`, opt-in via `CROSS_MODEL_VERIFY=true`): runs both providers and flags scalar disagreements as warnings. Cost is 2×; it's off by default because the trigger is "real error rate > 1%" — we're ~0% on 6 eval cases.
+
+The system's stance on the LLM: **it's allowed to be wrong, just not silently.**
+
+### 5. Trade-offs at a glance
+
+| Axis | Choice | Trade-off accepted |
+|---|---|---|
+| Extraction | Hybrid regex + LLM (D1) | More code than pure-LLM; regex needs maintenance per new format |
+| LLM call shape | `tool_use` w/ schema (D7) | Provider-specific quirks; mitigated by `LLMProvider` Protocol (D12) |
+| Vendor | Anthropic primary, OpenAI swap-in (D2, D12) | Two SDKs in `requirements.txt`; pays back at first vendor outage |
+| API model | Sync 201 (D3) | Caller blocks 10-30s; not viable past ~10 docs/min sustained (M5 trigger) |
+| Storage | SQLite + local FS (D4, D9) | Single-node; URL-swap to Postgres + S3 when multi-tenant (M6) |
+| Schema shape | Typed columns + JSON blob (D5) | Two query paths; pays back when new schema fields land mid-flight |
+| Versioning | Append-only `processing_runs` (D6) | More storage; pays back the moment we change prompt or model |
+| Summary | Templated abstractive (D8) | LLM call cost; pays back vs unreadable extractive legalese |
+| Eval | Mini harness + judge (D10, v3) | More upfront engineering; pays back every prompt/model swap |
+| Tests | Real tests, mocked LLM (D11) | Setup complexity; pays back at every regression |
+
+### 6. What I deliberately did NOT do (and why)
+
+Three categories, each with a clear shape:
+
+- **Production-only with documented milestone trigger:** Auth (M1), Postgres+S3 (M6), async/Celery (M5), per-insurer prompt routing (M8), PII redaction (M19).
+- **Wrong-shape at MVP scale:** htmx/React rewrite (Streamlit ships in 1h vs 6h for marginal gain), vector RAG (14-page docs fit in 5K tokens), streaming responses (extraction isn't chat-shaped).
+- **Right-shape, wrong-time:** span-level PDF highlighting (v3 ships page-level badges; span needs PDF.js + regex-offset capture — 80/20 trade), real ACORD/COI labeled eval corpus (no labeled set available yet).
+
+The principle: **a NOT is a documented decision with a trigger condition, not a silent omission.** Full list in "What's Out of Scope" + "What's new in v3 / v2" below.
+
+### 7. Topics I'd raise before the interviewer asks
+
+The questions a senior reviewer always lands on:
+
+1. **Cost at scale.** 2 LLM calls × $0.01-0.10/doc. At 100k/mo = mid-4-figures. → Cache by `pdf_sha256` (already indexed, dedupes re-uploads); demote summary to Haiku 4.5; turn on prompt caching for the system prompt.
+2. **Hallucination beyond schema validation.** Pydantic catches format errors; source-grounding (`validate.py`) + cross-model verifier (v3) catches value errors. Production also wants: regex confirm of policy-number patterns, dictionary check of insurer name against a known list (NAIC registry).
+3. **Exclusions are deceptively hard.** Conditional ("except if…"), time-bound ("during the first 2 years…"), nested ("the exclusion in 5(a) does not apply when…"). MVP stores raw strings — good enough for human review, not enough for downstream reasoning. Production needs a domain-expert-designed taxonomy and a structured `Exclusion` row per clause.
+4. **PII + compliance.** Policies contain SSN, address, health information. Production: column-level encryption, access log, retention policy, geo-restricted storage (M2, M19).
+5. **How do you know it's correct?** Mini eval harness in repo: 6 golden cases, regex baseline ~39%, CI gate at 30% (regression catch). v3 added LLM-as-judge for free-text fields. Production: 100+ hand-labeled golden set covering ACORD + COI + life + auto + home; every prompt/model swap re-runs the suite.
+
+### 8. One-line thesis
+
+**Treat the LLM as an unreliable contractor: every output needs evidence
+(source page), monitoring (confidence + warnings), and the ability to retry
+with a different model.** The architecture isn't about clever prompting — it's
+about systematically constraining where the LLM is allowed to be wrong
+silently.
+
 ## Design Decisions
 
 Eleven decisions, each in "Chose X over Y because Z. With more time: W (M#)."
