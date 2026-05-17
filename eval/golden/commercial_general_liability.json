@@ -1,0 +1,18 @@
+{
+  "case_name": "commercial_general_liability",
+  "pdf_filename": "commercial_general_liability.pdf",
+  "description": "Synthetic Commercial General Liability declarations page from a fictional 'Atlantic Commercial Risk Group'. Uses 'Named Insured' and a combined 'Policy Period: A - B' label (not separate effective/expiration), per-occurrence/aggregate dollar limits, and commercial exclusions (pollution, professional, employee actions). Tests format diversity beyond life insurance.",
+  "expected": {
+    "policy_number": "CGL-2024-554433",
+    "insured_name": "Riverside Manufacturing LLC",
+    "insurer_name": "Atlantic Commercial Risk Group",
+    "policy_type": "Commercial General Liability",
+    "effective_date": "2024-01-01",
+    "expiration_date": "2025-01-01",
+    "premium_amount": 5400.00,
+    "premium_frequency": "annual",
+    "premium_currency": "USD",
+    "face_amount": null,
+    "exclusions_must_include_substrings": ["pollution", "professional", "employee"]
+  }
+}

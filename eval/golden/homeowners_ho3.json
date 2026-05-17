@@ -1,0 +1,18 @@
+{
+  "case_name": "homeowners_ho3",
+  "pdf_filename": "homeowners_ho3.pdf",
+  "description": "Synthetic Homeowners HO-3 declarations from a fictional 'Beacon Mutual Homeowners'. Property-insurance vocabulary (Dwelling, Personal Property, Personal Liability) instead of life-insurance face amount. Standard HO-3 exclusions: flood, earthquake, war, wear-and-tear.",
+  "expected": {
+    "policy_number": "HO3-456789-2024",
+    "insured_name": "Robert Chen",
+    "insurer_name": "Beacon Mutual Homeowners",
+    "policy_type": "Homeowners HO-3",
+    "effective_date": "2024-04-15",
+    "expiration_date": "2025-04-15",
+    "premium_amount": 1250.00,
+    "premium_frequency": "annual",
+    "premium_currency": "USD",
+    "face_amount": null,
+    "exclusions_must_include_substrings": ["flood", "earthquake", "war", "wear and tear"]
+  }
+}
