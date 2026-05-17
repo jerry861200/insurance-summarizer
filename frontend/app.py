@@ -7,7 +7,11 @@ Env vars:
     BACKEND_URL   FastAPI backend URL (default: http://localhost:8000)
 """
 from __future__ import annotations
+
+import base64
 import os
+from typing import Any
+
 import httpx
 import streamlit as st
 
@@ -47,6 +51,19 @@ def list_documents(limit: int = 10) -> list[dict]:
         return []
 
 
+def fetch_pdf_bytes(doc_id: str) -> bytes | None:
+    """Fetch raw PDF bytes for a previously-uploaded document.
+
+    Returns None if the fetch fails (e.g. backend offline, PDF expired).
+    """
+    try:
+        r = httpx.get(f"{BACKEND_URL}/documents/{doc_id}/pdf", timeout=DEFAULT_TIMEOUT)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
+
+
 def confidence_color(score: float) -> str:
     """Return a CSS color hex for confidence bar."""
     if score >= 0.85:
@@ -71,11 +88,34 @@ def render_confidence_bar(score: float, label: str = "") -> None:
     st.markdown(bar_html, unsafe_allow_html=True)
 
 
+def render_page_badge(pages: list[int] | None) -> str:
+    """Return inline HTML for the small page-citation badge.
+
+    Empty string if no pages — caller can concatenate unconditionally.
+    """
+    if not pages:
+        return ""
+    # De-duplicate while preserving order
+    seen = set()
+    unique_pages: list[int] = []
+    for p in pages:
+        if p not in seen:
+            seen.add(p)
+            unique_pages.append(p)
+    label = ", ".join(f"p.{p}" for p in unique_pages)
+    return (
+        f'<span style="font-size:11px; color:#6b7280; margin-left:8px;">'
+        f'\U0001F4C4 {label}'
+        f'</span>'
+    )
+
+
 def render_extracted_fields(result: dict) -> None:
-    """2-column layout of extracted fields with confidence bars."""
+    """2-column layout of extracted fields with confidence bars + page badges."""
     fields = result.get("extracted_fields") or {}
     confidence = result.get("confidence") or {}
     origin = result.get("extraction_method_per_field") or {}
+    page_hints = result.get("source_page_hints") or {}
 
     if not fields:
         st.warning("No fields extracted.")
@@ -101,7 +141,10 @@ def render_extracted_fields(result: dict) -> None:
             value = fields.get(key)
             conf = confidence.get(key, 0.0)
             method = origin.get(key, "—")
-            st.markdown(f"**{label}**")
+            badge = render_page_badge(page_hints.get(key))
+            # B3: inline page badge next to label (rendered as raw HTML so the
+            # styled span survives).
+            st.markdown(f"**{label}**{badge}", unsafe_allow_html=True)
             if value is not None and value != "":
                 st.markdown(f"`{value}`")
                 render_confidence_bar(conf, label=f"via {method}")
@@ -141,56 +184,53 @@ def render_warnings(warnings: list[dict]) -> None:
             st.info(line)
 
 
-# === Sidebar ===
-with st.sidebar:
-    st.title("Insurance Summarizer")
-    st.caption("v2 demo — Streamlit frontend")
+def render_pdf_preview(doc_id: str, pdf_bytes: bytes | None) -> None:
+    """B2: render the source PDF inline.
 
-    backend_input = st.text_input("Backend URL", value=BACKEND_URL, key="backend_url_input")
-    if backend_input != BACKEND_URL:
-        BACKEND_URL = backend_input
+    Tries `streamlit-pdf-viewer` first; falls back to a base64 iframe so the
+    tab is still useful when the package isn't installed.
+    """
+    if not pdf_bytes:
+        st.warning(
+            f"Could not fetch PDF bytes from {BACKEND_URL}/documents/{doc_id}/pdf."
+        )
+        return
+    try:
+        from streamlit_pdf_viewer import pdf_viewer  # type: ignore
 
-    health = fetch_health()
-    if health:
-        st.success(f"Backend OK — model: `{health.get('model', '?')}` · env: `{health.get('environment', '?')}`")
-    else:
-        st.error(f"Backend unreachable at {BACKEND_URL}")
-
-    st.divider()
-    st.subheader("Recent uploads")
-    recent = list_documents(limit=5)
-    if recent:
-        for doc in recent:
-            st.caption(f"`{doc.get('id', '')[:8]}` · {doc.get('filename', '?')} · {doc.get('status', '?')}")
-    else:
-        st.caption("(none yet)")
+        pdf_viewer(pdf_bytes, width=700)
+    except ImportError:
+        b64 = base64.b64encode(pdf_bytes).decode()
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{b64}" '
+            f'width="100%" height="800"></iframe>',
+            unsafe_allow_html=True,
+        )
 
 
-# === Main panel ===
-st.title("Upload an insurance policy PDF")
-st.caption(
-    "Extracts structured fields via hybrid regex + LLM pipeline; produces a "
-    "human-readable summary. Source-grounded validation flags possible "
-    "hallucinations as warnings."
-)
+def _summarize_for_batch(result: dict) -> dict[str, Any]:
+    """Pluck a few fields out for the batch summary table."""
+    fields = result.get("extracted_fields") or {}
+    warnings = result.get("warnings") or []
+    return {
+        "Doc ID": (result.get("id") or "")[:12],
+        "Status": result.get("status", "?"),
+        "Policy #": fields.get("policy_number") or "—",
+        "Premium": fields.get("premium_amount") or "—",
+        "Warnings": len(warnings),
+    }
 
-uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
 
-if uploaded is not None:
-    with st.spinner(f"Processing `{uploaded.name}` ... (~10-30s)"):
-        try:
-            result = upload_document(uploaded.getvalue(), uploaded.name)
-        except httpx.HTTPStatusError as e:
-            st.error(f"Backend error: {e.response.status_code} — {e.response.text}")
-            st.stop()
-        except Exception as e:
-            st.error(f"Upload failed: {type(e).__name__} — {e}")
-            st.stop()
+def render_single_result(result: dict) -> None:
+    """5-tab layout for a single successfully-uploaded document."""
+    doc_id = result.get("id", "")
+    st.success(
+        f"Done · document id `{doc_id[:12]}` · status `{result.get('status')}`"
+    )
 
-    st.success(f"Done · document id `{result.get('id', '?')[:12]}` · status `{result.get('status')}`")
-
-    tab_fields, tab_summary, tab_warnings, tab_raw = st.tabs(
-        ["Extracted Fields", "Summary", "Warnings", "Raw JSON"]
+    # B2: "PDF Preview" tab is inserted BEFORE "Raw JSON" (now the 5th tab).
+    tab_fields, tab_summary, tab_warnings, tab_pdf, tab_raw = st.tabs(
+        ["Extracted Fields", "Summary", "Warnings", "PDF Preview", "Raw JSON"]
     )
 
     with tab_fields:
@@ -201,7 +241,10 @@ if uploaded is not None:
         if summary:
             st.markdown(summary)
         else:
-            st.info("No summary generated (LLM summary call may have failed — check warnings tab).")
+            st.info(
+                "No summary generated (LLM summary call may have failed — "
+                "check warnings tab)."
+            )
 
     with tab_warnings:
         warnings = result.get("warnings") or []
@@ -210,8 +253,157 @@ if uploaded is not None:
         else:
             render_warnings(warnings)
 
+    with tab_pdf:
+        # Streamlit re-runs the script on every interaction, so fetching here
+        # is fine — it only fires while this tab is "active enough" for the
+        # render to happen.
+        pdf_bytes = fetch_pdf_bytes(doc_id) if doc_id else None
+        render_pdf_preview(doc_id, pdf_bytes)
+
     with tab_raw:
         st.json(result)
+
+
+# === Sidebar ===
+with st.sidebar:
+    st.title("Insurance Summarizer")
+    st.caption("v3 demo — Streamlit frontend")
+
+    backend_input = st.text_input(
+        "Backend URL", value=BACKEND_URL, key="backend_url_input"
+    )
+    if backend_input != BACKEND_URL:
+        BACKEND_URL = backend_input
+
+    health = fetch_health()
+    if health:
+        st.success(
+            f"Backend OK — model: `{health.get('model', '?')}` · "
+            f"env: `{health.get('environment', '?')}`"
+        )
+    else:
+        st.error(f"Backend unreachable at {BACKEND_URL}")
+
+    st.divider()
+    st.subheader("Recent uploads")
+    recent = list_documents(limit=5)
+    if recent:
+        for doc in recent:
+            st.caption(
+                f"`{doc.get('id', '')[:8]}` · {doc.get('filename', '?')} · "
+                f"{doc.get('status', '?')}"
+            )
+    else:
+        st.caption("(none yet)")
+
+
+# === Main panel ===
+st.title("Upload one or more insurance policy PDFs")
+st.caption(
+    "Extracts structured fields via hybrid regex + LLM pipeline; produces a "
+    "human-readable summary. Source-grounded validation flags possible "
+    "hallucinations as warnings. Upload multiple files for batch mode."
+)
+
+# B4: batch upload — accept_multiple_files=True. A single file falls through to
+# the existing rich single-file flow; multiple files trigger the batch loop.
+uploaded_files = st.file_uploader(
+    "Choose one or more PDFs",
+    type=["pdf"],
+    accept_multiple_files=True,
+)
+
+if uploaded_files:
+    if len(uploaded_files) == 1:
+        single = uploaded_files[0]
+        with st.spinner(f"Processing `{single.name}` ... (~10-30s)"):
+            try:
+                result = upload_document(single.getvalue(), single.name)
+            except httpx.HTTPStatusError as e:
+                st.error(
+                    f"Backend error: {e.response.status_code} — {e.response.text}"
+                )
+                st.stop()
+            except Exception as e:
+                st.error(f"Upload failed: {type(e).__name__} — {e}")
+                st.stop()
+        render_single_result(result)
+
+    else:
+        # Multi-file batch flow — per-file progress + summary table.
+        # Errors per file are collected, NOT raised — the loop runs to completion.
+        st.info(
+            f"Batch mode: processing {len(uploaded_files)} files sequentially."
+        )
+
+        progress = st.progress(0.0, text="Starting batch...")
+        rows: list[dict[str, Any]] = []
+        successes: list[dict] = []
+        failures: list[tuple[str, str]] = []
+
+        for idx, up in enumerate(uploaded_files, start=1):
+            progress.progress(
+                (idx - 1) / len(uploaded_files),
+                text=f"({idx}/{len(uploaded_files)}) {up.name}",
+            )
+            try:
+                result = upload_document(up.getvalue(), up.name)
+                rows.append(
+                    {"Filename": up.name, **_summarize_for_batch(result)}
+                )
+                successes.append(result)
+            except httpx.HTTPStatusError as e:
+                failures.append(
+                    (
+                        up.name,
+                        f"HTTP {e.response.status_code}: {e.response.text[:120]}",
+                    )
+                )
+                rows.append(
+                    {
+                        "Filename": up.name,
+                        "Doc ID": "—",
+                        "Status": "failed",
+                        "Policy #": "—",
+                        "Premium": "—",
+                        "Warnings": 0,
+                    }
+                )
+            except Exception as e:
+                failures.append((up.name, f"{type(e).__name__}: {e}"))
+                rows.append(
+                    {
+                        "Filename": up.name,
+                        "Doc ID": "—",
+                        "Status": "failed",
+                        "Policy #": "—",
+                        "Premium": "—",
+                        "Warnings": 0,
+                    }
+                )
+
+        progress.progress(
+            1.0,
+            text=f"Done — {len(successes)}/{len(uploaded_files)} succeeded",
+        )
+
+        st.subheader("Batch summary")
+        st.table(rows)
+
+        if failures:
+            st.subheader(f"Errors ({len(failures)})")
+            for name, err in failures:
+                st.error(f"**{name}** — {err}")
+
+        # Per-file detail expander for everything that succeeded
+        if successes:
+            st.subheader("Per-file details")
+            for result in successes:
+                with st.expander(
+                    f"{result.get('filename', '?')} · "
+                    f"`{(result.get('id') or '')[:12]}`"
+                ):
+                    render_single_result(result)
 
 # Footer
 st.divider()

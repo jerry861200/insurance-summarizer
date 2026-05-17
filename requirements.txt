@@ -29,6 +29,7 @@ respx>=0.21
 
 # Frontend
 streamlit>=1.40
+streamlit-pdf-viewer>=0.0.14
 
 # Eval tooling
 reportlab>=4.0

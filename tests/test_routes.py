@@ -52,6 +52,16 @@ def test_upload_pdf_returns_201_with_extracted_fields(client, sample_pdf_bytes):
     # The mock LLM should have been hit at least once.
     assert client.mock_llm.extract_calls >= 1
 
+    # B1: response now populates previously-silent-empty fields
+    assert isinstance(body["confidence"], dict)
+    assert body["confidence"] is not None
+    assert isinstance(body["source_page_hints"], dict)
+    assert body["source_page_hints"] is not None
+    assert isinstance(body["extraction_method_per_field"], dict)
+    # MockLLMProvider sets source_page_hints={"policy_number": [1], "effective_date": [1]}
+    assert body["source_page_hints"].get("policy_number") == [1]
+    assert body["source_page_hints"].get("effective_date") == [1]
+
 
 def test_upload_rejects_non_pdf_filename(client):
     files = {"file": ("notes.txt", b"hello", "text/plain")}
@@ -73,6 +83,10 @@ def test_get_document_returns_existing(client, sample_pdf_bytes):
     body = resp.json()
     assert body["id"] == doc_id
     assert body["extracted_fields"]["policy_number"] == "VF99999990"
+    # B1: GET also returns populated source_page_hints/confidence (not None)
+    assert isinstance(body["source_page_hints"], dict)
+    assert isinstance(body["confidence"], dict)
+    assert body["source_page_hints"].get("policy_number") == [1]
 
 
 def test_get_document_404_for_unknown_id(client):
