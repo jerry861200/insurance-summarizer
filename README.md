@@ -33,7 +33,7 @@ cd insurance-summarizer
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # then edit to set ANTHROPIC_API_KEY
+cp .env.example .env  # then edit to set ANTHROPIC_API_KEY, or set LLM_PROVIDER=openai + OPENAI_API_KEY to use OpenAI instead
 ```
 
 ### Run

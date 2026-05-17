@@ -10,10 +10,10 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
         case "anthropic":
             return AnthropicProvider(model=settings.anthropic_model, api_key=settings.anthropic_api_key)
         case "openai":
-            # Placeholder for future OpenAIProvider; raise for now
-            raise NotImplementedError("OpenAI provider not yet implemented")
+            from app.extractors.llm.openai_provider import OpenAIProvider
+            return OpenAIProvider(model=settings.openai_model, api_key=settings.openai_api_key)
         case _:
             raise ValueError(f"Unknown llm_provider: {settings.llm_provider}")
 
 
-__all__ = ["LLMProvider", "ExtractionResult", "SummaryResult", "AnthropicProvider", "get_llm_provider"]
+__all__ = ["LLMProvider", "ExtractionResult", "SummaryResult", "AnthropicProvider", "OpenAIProvider", "get_llm_provider"]
