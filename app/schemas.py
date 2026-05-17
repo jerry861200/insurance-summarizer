@@ -67,6 +67,7 @@ class DocumentResponse(BaseModel):
     extracted_fields: ExtractedFieldsSchema | None = None
     confidence: dict[str, float] = Field(default_factory=dict)
     extraction_method_per_field: dict[str, str] = Field(default_factory=dict)
+    source_page_hints: dict[str, list[int]] = Field(default_factory=dict)
     summary_markdown: str | None = None
     warnings: list[ValidationWarningSchema] = Field(default_factory=list)
     processing_run_id: int | None = None
