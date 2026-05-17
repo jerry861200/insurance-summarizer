@@ -7,17 +7,19 @@ scoring, and produces a human-readable Markdown summary. The LLM layer is
 vendor-neutral — pipeline code never imports the Anthropic SDK directly, so
 swapping providers or models is a config change rather than a refactor.
 
-> **Build context:** Built in two iterations using Claude Code with AI-assisted
-> parallel agent execution:
-> - **v1 (1.5 hr, 2026-05-16):** core pipeline + 28 tests + 11 design decisions
->   + comprehensive design rationale doc. Met brief's "Recommended Scope" plus
->   the upgrades beyond it (hybrid regex+LLM, OCR fallback, source-grounded
->   validation, mini eval harness, vendor-neutral LLM abstraction).
-> - **v2 (~3 hr, 2026-05-16):** OpenAI provider (proved D12 vendor abstraction
+> **Build context:** Built in three iterations using Claude Code with AI-assisted
+> parallel agent execution. Every design decision is a defensible technical
+> choice, not a tool output.
+> - **v1 (~1.5 hr, 2026-05-16):** core pipeline + 28 tests + 11 design decisions
+>   + comprehensive design rationale. Hybrid regex+LLM, OCR fallback,
+>   source-grounded validation, mini eval harness, vendor-neutral LLM abstraction.
+> - **v2 (~3 hr, 2026-05-16):** OpenAI provider (proved the D12 vendor abstraction
 >   ships without pipeline changes), Streamlit frontend, Railway deploy config,
->   eval expansion (1 → 3 cases). See "What's new in v2" section below.
->
-> Every design decision is a defensible technical choice, not a tool output.
+>   eval expansion 1 → 3 cases.
+> - **v3 (~4 hr, 2026-05-17):** three orthogonal axes run as parallel agents in
+>   isolated worktrees — Ops (Docker + GitHub Actions CI + cross-model verifier),
+>   UX (PDF preview + source page badges + batch upload), Accuracy (3 new
+>   synthetic cases + LLM-as-judge). 52 tests, eval at 6 cases.
 
 ## Quick Start
 
@@ -75,6 +77,18 @@ streamlit run frontend/app.py
 # Or point at a deployed backend:
 BACKEND_URL=https://your-deploy.up.railway.app streamlit run frontend/app.py
 ```
+
+### Run via Docker (v3, no local Python needed)
+
+```bash
+cp .env.example .env  # fill in OPENAI_API_KEY or ANTHROPIC_API_KEY
+docker compose up --build
+# First build ~3 min (tesseract + poppler); subsequent builds are seconds.
+# API at http://localhost:8000/healthz · Swagger at /docs
+```
+
+See [docs/deploy.md](docs/deploy.md) for the full Docker walkthrough and the
+Railway alternative.
 
 ## Architecture
 
@@ -215,32 +229,54 @@ format. Numbers in parentheses cite milestones in the post-MVP roadmap.
     obvious upgrade — this is one of the few decisions where the MVP
     version IS the production version.
 
-## What's new in v2
+## What's new in v3
 
-This iteration validated v1's claims by exercising them under expansion, plus
-added the parts that make demoing tangible.
+Three orthogonal axes shipped via three parallel agents in isolated git
+worktrees — chose this over sequential work because file ownership was
+disjoint (Ops touches infra/pipeline; UX touches frontend/schemas/routes;
+Accuracy touches `eval/*`) and the integration merge was nearly conflict-free.
+
+| Axis | What landed | Why |
+|---|---|---|
+| **Ops** | `Dockerfile` + `docker-compose.yml` for any-environment deploy; `.github/workflows/ci.yml` runs pytest + eval regression gate; `app/extractors/llm/verifier.py` (opt-in cross-model verification — M12) | Reproducible deploy beyond Railway; quality gate on every PR; opt-in disagreement detection when both API keys are available |
+| **UX** | New "PDF Preview" tab (`streamlit-pdf-viewer` with iframe fallback); `📄 p.N` page badges next to each extracted field; multi-file batch upload with progress + summary table; **fixed a silent v2 bug** where `confidence`, `extraction_method_per_field`, and warnings were declared in `DocumentResponse` but never populated | Source provenance answers "where did this come from?" with a click; batch demo answers "what if you have 50 policies?"; bug fix made existing confidence bars actually show real scores |
+| **Accuracy** | 3 new synthetic eval cases (Commercial GL, Auto multi-vehicle, HO-3 homeowners); `eval/judge.py` LLM-as-judge for semantic similarity on free-text fields; `compare_semantic` in `eval/metrics.py`; `--judge` flag in `run_eval` | Format diversity (different field labels, currency formats, multi-vehicle); honest scoring on outputs like exclusions where exact-match is brittle |
+
+### Tests jumped 32 → 52
+
+- +4 verifier tests (mock `LLMProvider` at the Protocol boundary, not HTTP)
+- +1 frontend smoke test (`import frontend.app` doesn't raise)
+- +15 judge / eval tests (mocked judge callables; zero real API calls)
+- +0 new route tests but added assertions for the now-populated response fields
+
+### Eval matrix at v3
+
+6 cases: 1 real (Leland Stanford Pacific Life) + 5 synthetic (Term Life,
+Whole Life binder, Commercial GL, Auto multi-vehicle, HO-3 homeowners). Regex-only
+baseline average score 39% — CI gate is set to 30% with deliberate slack to
+catch regressions without being flaky.
+
+### Why these three axes, NOT others
+
+| Cut | Reason |
+|---|---|
+| **Span-level highlighting** (overlay boxes on PDF for exact source) | ~3h alone; needs PDF.js + regex offset capture + storage schema change. Page-level badges (B3) deliver 80% of the value at ~25% of the effort. Add only if interview signals deep interest. |
+| **Real ACORD/COI eval PDFs** | Meta sandbox can't fetch external URLs; user deferred. 5 synthetic cases at diverse formats prove the harness scales — real PDFs are an upgrade, not a foundation. |
+| **Postgres + S3** | 1-line URL swap (D4); zero behavior diff at MVP scale; wait for multi-user trigger. |
+| **Auth + RBAC** | No real users; login friction every demo. |
+| **Async / Celery** | Sync 10-30s per PDF is fine; async needs Redis = infra surface. |
+| **Per-insurer prompt routing** | Chicken-and-egg without 50+ insurer-labeled docs. |
+| **Sentry / Datadog** | Logs + uvicorn stderr cover MVP; production-only. |
+
+## What's new in v2
 
 | Area | v1 (1.5h) | v2 (~3h additional) |
 |---|---|---|
 | **LLM providers** | Anthropic only | Anthropic + OpenAI (factory pattern; swap via `LLM_PROVIDER` env var) |
-| **Frontend** | Swagger UI / curl only | Streamlit UI: upload + extracted fields with confidence bars + Markdown summary + warnings inspector |
+| **Frontend** | Swagger UI / curl only | Streamlit UI: upload + extracted fields + Markdown summary + warnings inspector |
 | **Deploy** | Local only | Railway-ready: `Procfile`, `railway.json`, `nixpacks.toml` (auto-installs tesseract + poppler), `docs/deploy.md` walkthrough |
-| **Eval cases** | 1 hand-labeled (Leland Stanford) | 3 cases: real Pacific Life + 2 synthetic (reportlab) covering different insurer format + missing-fields edge case |
+| **Eval cases** | 1 hand-labeled (Leland Stanford) | 3 cases: real Pacific Life + 2 synthetic (reportlab) — different insurer format + missing-fields edge case |
 | **Tests** | 28 | 32 (+4 OpenAI provider tests, all mocked via respx) |
-
-### Why these specific upgrades — what was deliberately NOT added
-
-We chose a focused ~3-hour scope (afternoon work) over a 2-day rewrite. Things
-considered and explicitly cut:
-
-- **Auth / multi-tenancy / Postgres + S3** — production-only concerns; SQLite + local FS works on Railway free tier (with documented ephemeral-storage caveat); milestone M1/M2/M6 trigger when first real user appears.
-- **htmx or React frontend** — Streamlit ships full upload+display in ~1h vs 2-6h for marginal UX gain; would have eaten the whole budget.
-- **Source-highlighting UI** (click extracted field → highlight PDF region) — needs PyMuPDF bounding-box work ~3h alone; bigger than entire iteration budget. M14.
-- **Async / Celery** — sync 10-30s/PDF is fine; needs Redis = another Railway service. M5 when > 10 docs/min sustained.
-- **Per-insurer prompt overrides** — chicken-and-egg without 50+ insurer-labeled PDFs to identify systematic failures. M8 once eval expands to 50+ cases (M4).
-- **Cross-model verifier** (extract with one LLM, verify with another) — 2× cost + 30% latency; M12 trigger is "real error > 1%", we're ~0% on the 3 eval cases.
-
-The principle: **every NOT is either wrong-sized for the budget OR a production-only concern with a clear milestone trigger documented in the post-MVP roadmap.**
 
 ## What's Out of Scope
 
@@ -253,13 +289,13 @@ The principle: **every NOT is either wrong-sized for the budget OR a production-
 
 ## What I'd Build Next
 
-Top 5 from the post-MVP roadmap:
+Top 5 from the post-MVP roadmap (M12 verifier and M13 CI gate were landed in v3):
 
 1. **M1 — Auth + RBAC.** OAuth2 / API keys with per-org row-level isolation. Blocker for any real user.
 2. **M2 — Encryption at rest + audit log.** DB column encryption for PII, file encryption at rest, who-accessed-what log. Compliance pre-launch.
 3. **M3 — OCR upgrade.** Swap Tesseract for AWS Textract or Azure Document Intelligence (Azure has pre-built insurance models for ACORD forms). Drop-in replacement for `app/ocr.py`.
-4. **M4 — Eval harness expansion (5 -> 50+ PDFs).** ACORD forms + COI + life + auto + home. Gate CI on accuracy regression vs baseline.
-5. **M5 — Async processing.** Celery + Redis; `POST` returns 202 + job ID; client polls status. Trigger: > 10 docs/min sustained or 30-page documents become common.
+4. **M4 — Eval harness expansion (6 → 50+ PDFs).** Real ACORD forms + COI + life + auto + home labeled corpus. The v3 CI gate already wires the regression check; just feed it more cases.
+5. **M14 — Span-level source highlighting.** v3 ships page-level badges; the natural follow-on is bounding-box overlay tied to specific text spans (requires regex offset capture + PDF.js).
 
 The full roadmap (M1-M22) with tiers, effort, value type, and trigger
 conditions is in the plan document.
@@ -272,19 +308,23 @@ insurance-summarizer/
 |-- requirements.txt
 |-- pyproject.toml                         Ruff + pytest config
 |-- .env.example
+|-- Dockerfile                             NEW v3: python:3.11-slim + tesseract + poppler
+|-- docker-compose.yml                     NEW v3: single-service compose; storage as volume
+|-- .dockerignore                          NEW v3
+|-- .github/workflows/ci.yml               NEW v3: pytest + eval regression gate
 |-- Procfile                               Railway: web process command
 |-- railway.json                           Railway: build + healthcheck config
 |-- nixpacks.toml                          Railway: install tesseract + poppler
-|-- .python-version                        Python pin (3.12)
+|-- .python-version                        Python pin (3.11)
 |-- app/
-|   |-- main.py                            FastAPI factory + /healthz
-|   |-- config.py                          pydantic-settings
-|   |-- routes.py                          HTTP endpoints
-|   |-- pipeline.py                        Orchestrator
+|   |-- main.py                            FastAPI factory + /healthz (v3: active-provider model)
+|   |-- config.py                          pydantic-settings (v3: cross_model_verify flag)
+|   |-- routes.py                          HTTP endpoints (v3: response now populates confidence, source_page_hints, warnings)
+|   |-- pipeline.py                        Orchestrator (v3: optional verifier hook)
 |   |-- pdf.py                             pdfplumber + scanned detection
 |   |-- ocr.py                             Tesseract fallback
 |   |-- validate.py                        Source-grounding + confidence
-|   |-- schemas.py                         Pydantic API contracts
+|   |-- schemas.py                         Pydantic API contracts (v3: source_page_hints field)
 |   |-- models.py                          SQLAlchemy ORM (5 tables)
 |   |-- storage.py                         DB engine + file helpers
 |   `-- extractors/
@@ -292,33 +332,44 @@ insurance-summarizer/
 |       `-- llm/
 |           |-- base.py                    LLMProvider Protocol
 |           |-- prompts.py                 Vendor-neutral prompts + tool schema
-|           `-- anthropic_provider.py      Anthropic SDK impl
-|-- frontend/                              Streamlit UI (new in v2)
-|   |-- app.py                             Single-file Streamlit app
+|           |-- anthropic_provider.py      Anthropic SDK impl
+|           |-- openai_provider.py         v2: OpenAI SDK impl (proves D12)
+|           `-- verifier.py                NEW v3: opt-in cross-model disagreement detection
+|-- frontend/                              Streamlit UI (v2; v3: PDF preview, page badges, batch upload)
+|   |-- app.py
 |   `-- README.md
-|-- tests/                                 32 tests across pdf/regex/validate/routes/providers
+|-- tests/                                 52 tests (v3: +4 verifier, +1 frontend smoke, +15 judge)
 |-- eval/
-|   |-- generate_synthetic_pdfs.py         NEW v2: regenerates synthetic PDFs
+|   |-- generate_synthetic_pdfs.py         v2; v3 added 3 more generators
+|   |-- judge.py                           NEW v3: LLM-as-judge for free-text fields
+|   |-- run_eval.py                        v3: --judge flag
+|   |-- metrics.py                         v3: compare_semantic
 |   `-- golden/
-|       |-- leland_stanford.{pdf,json}        v1
-|       |-- short_term_policy.{pdf,json}      v2 — synthetic, format variety
-|       `-- missing_fields_policy.{pdf,json}  v2 — synthetic, null-over-guess test
+|       |-- leland_stanford.{pdf,json}                    v1
+|       |-- short_term_policy.{pdf,json}                  v2
+|       |-- missing_fields_policy.{pdf,json}              v2
+|       |-- commercial_general_liability.{pdf,json}       NEW v3
+|       |-- auto_multi_vehicle.{pdf,json}                 NEW v3
+|       `-- homeowners_ho3.{pdf,json}                     NEW v3
 |-- sample/leland_stanford_policy.pdf      Sample for demo
 `-- docs/
     |-- architecture.md
     |-- design_rationale.md
     |-- sample_summary.md
-    `-- deploy.md                          NEW v2: Railway walkthrough
+    |-- deploy.md                          v2 (Railway); v3 (prepends Docker section)
+    `-- eval_results.md                    Regenerated by `python -m eval.run_eval --output ...`
 ```
 
 ## Tests
 
-The test suite covers `app/pdf.py` (6 tests), `app/extractors/regex.py` (7),
-`app/validate.py` (6), and the FastAPI routes (9) for 32 tests (28 v1 + 4 v2
-OpenAI provider tests). The route tests use a mock `LLMProvider` so CI doesn't
-burn API calls; the v2 OpenAI provider tests use `respx` to mock the HTTP
-layer. The integration test confirms end-to-end that `POST /documents` against
-the Leland Stanford PDF returns `policy_number = "VF99999990"`. Run with:
+52 tests across `app/pdf.py` (6), `app/extractors/regex.py` (7), `app/validate.py`
+(6), FastAPI routes (9), OpenAI provider (4, mocked via `respx`),
+cross-model verifier (4, mocked at the Protocol boundary), Streamlit smoke
+test (1), and LLM-as-judge / eval framework (15). No test makes real LLM API
+calls — extraction is via a mock `LLMProvider`, HTTP is mocked via `respx`,
+and judge functions are injected as fakes. The integration test confirms
+end-to-end that `POST /documents` against the Leland Stanford PDF returns
+`policy_number = "VF99999990"`. Run with:
 
 ```bash
 pytest tests/ -v
