@@ -7,14 +7,17 @@ scoring, and produces a human-readable Markdown summary. The LLM layer is
 vendor-neutral — pipeline code never imports the Anthropic SDK directly, so
 swapping providers or models is a config change rather than a refactor.
 
-> **Build context:** ~1.5 hours wall-clock as a take-home submission, built
-> with AI-assisted parallel agent execution (Claude Code orchestrating
-> sub-agents per phase). The brief's "Recommended Scope" suggested 45-60
-> minutes for implementation; the extra time was spent on the upgrades
-> beyond the brief minimum — hybrid regex + LLM extraction, OCR fallback,
-> source-grounded validation, 28 tests, mini eval harness, vendor-neutral
-> LLM abstraction, and the design rationale doc. Every design decision in
-> the rationale is a defensible technical choice, not a tool output.
+> **Build context:** Built in two iterations using Claude Code with AI-assisted
+> parallel agent execution:
+> - **v1 (1.5 hr, 2026-05-16):** core pipeline + 28 tests + 11 design decisions
+>   + comprehensive design rationale doc. Met brief's "Recommended Scope" plus
+>   the upgrades beyond it (hybrid regex+LLM, OCR fallback, source-grounded
+>   validation, mini eval harness, vendor-neutral LLM abstraction).
+> - **v2 (~3 hr, 2026-05-16):** OpenAI provider (proved D12 vendor abstraction
+>   ships without pipeline changes), Streamlit frontend, Railway deploy config,
+>   eval expansion (1 → 3 cases). See "What's new in v2" section below.
+>
+> Every design decision is a defensible technical choice, not a tool output.
 
 ## Quick Start
 
@@ -23,7 +26,8 @@ swapping providers or models is a config change rather than a refactor.
 - Python 3.11+
 - `tesseract` (`brew install tesseract` on Mac, `apt install tesseract-ocr` on Linux)
 - `poppler` (`brew install poppler` on Mac, `apt install poppler-utils` on Linux)
-- Anthropic API key (or skip if you just want the eval harness to run with `--mock`)
+- Anthropic API key OR OpenAI API key (set `LLM_PROVIDER=anthropic` or `openai`)
+- Streamlit (`pip install -r requirements.txt` includes it; only needed if running the UI)
 
 ### Install
 
@@ -61,21 +65,36 @@ Expected on the sample: `policy_number = "VF99999990"`,
 `face_amount = 500000`, `premium_amount = 36`, `premium_frequency = "monthly"`,
 with confidence >= 0.9 on the regex-extracted fields.
 
+### Run with Streamlit UI (optional but recommended for demo)
+
+```bash
+# In a second terminal (backend running on port 8000):
+streamlit run frontend/app.py
+# Opens http://localhost:8501
+
+# Or point at a deployed backend:
+BACKEND_URL=https://your-deploy.up.railway.app streamlit run frontend/app.py
+```
+
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client[Client<br/>curl / Swagger] -->|POST PDF| API[FastAPI app]
+    Browser[Browser] --> Streamlit[Streamlit UI<br/>frontend/app.py]
+    Client[curl / Swagger] -->|POST PDF| API[FastAPI app]
+    Streamlit -->|POST PDF| API
     API --> PDF[pdf.py<br/>pdfplumber]
     PDF -->|scanned?| OCR[ocr.py<br/>Tesseract fallback]
     PDF & OCR --> Regex[regex.py<br/>cheap deterministic]
     Regex --> Merge{merge<br/>regex wins<br/>on overlap}
-    LLM[LLM Provider<br/>Claude Opus 4.7] --> Merge
+    LLM[LLM Provider<br/>Anthropic OR OpenAI<br/>via factory + Protocol] --> Merge
     Merge --> Validate[validate.py<br/>source-grounding<br/>+ confidence]
     Validate --> Persist[(SQLite<br/>processing_runs<br/>extracted_fields<br/>summaries<br/>validation_warnings)]
     LLM --> Summary[summarize call<br/>templated abstractive]
     Summary --> Persist
-    Persist -->|JSON| Client
+    Persist -->|JSON| API
+    API -->|JSON| Client
+    API -->|JSON| Streamlit
 ```
 
 One FastAPI process; one synchronous pipeline per upload. PDF -> optional OCR
@@ -196,6 +215,33 @@ format. Numbers in parentheses cite milestones in the post-MVP roadmap.
     obvious upgrade — this is one of the few decisions where the MVP
     version IS the production version.
 
+## What's new in v2
+
+This iteration validated v1's claims by exercising them under expansion, plus
+added the parts that make demoing tangible.
+
+| Area | v1 (1.5h) | v2 (~3h additional) |
+|---|---|---|
+| **LLM providers** | Anthropic only | Anthropic + OpenAI (factory pattern; swap via `LLM_PROVIDER` env var) |
+| **Frontend** | Swagger UI / curl only | Streamlit UI: upload + extracted fields with confidence bars + Markdown summary + warnings inspector |
+| **Deploy** | Local only | Railway-ready: `Procfile`, `railway.json`, `nixpacks.toml` (auto-installs tesseract + poppler), `docs/deploy.md` walkthrough |
+| **Eval cases** | 1 hand-labeled (Leland Stanford) | 3 cases: real Pacific Life + 2 synthetic (reportlab) covering different insurer format + missing-fields edge case |
+| **Tests** | 28 | 32 (+4 OpenAI provider tests, all mocked via respx) |
+
+### Why these specific upgrades — what was deliberately NOT added
+
+We chose a focused ~3-hour scope (afternoon work) over a 2-day rewrite. Things
+considered and explicitly cut:
+
+- **Auth / multi-tenancy / Postgres + S3** — production-only concerns; SQLite + local FS works on Railway free tier (with documented ephemeral-storage caveat); milestone M1/M2/M6 trigger when first real user appears.
+- **htmx or React frontend** — Streamlit ships full upload+display in ~1h vs 2-6h for marginal UX gain; would have eaten the whole budget.
+- **Source-highlighting UI** (click extracted field → highlight PDF region) — needs PyMuPDF bounding-box work ~3h alone; bigger than entire iteration budget. M14.
+- **Async / Celery** — sync 10-30s/PDF is fine; needs Redis = another Railway service. M5 when > 10 docs/min sustained.
+- **Per-insurer prompt overrides** — chicken-and-egg without 50+ insurer-labeled PDFs to identify systematic failures. M8 once eval expands to 50+ cases (M4).
+- **Cross-model verifier** (extract with one LLM, verify with another) — 2× cost + 30% latency; M12 trigger is "real error > 1%", we're ~0% on the 3 eval cases.
+
+The principle: **every NOT is either wrong-sized for the budget OR a production-only concern with a clear milestone trigger documented in the post-MVP roadmap.**
+
 ## What's Out of Scope
 
 - **Web UI** — Swagger UI + curl are the demo surface
@@ -226,6 +272,10 @@ insurance-summarizer/
 |-- requirements.txt
 |-- pyproject.toml                         Ruff + pytest config
 |-- .env.example
+|-- Procfile                               Railway: web process command
+|-- railway.json                           Railway: build + healthcheck config
+|-- nixpacks.toml                          Railway: install tesseract + poppler
+|-- .python-version                        Python pin (3.12)
 |-- app/
 |   |-- main.py                            FastAPI factory + /healthz
 |   |-- config.py                          pydantic-settings
@@ -243,22 +293,32 @@ insurance-summarizer/
 |           |-- base.py                    LLMProvider Protocol
 |           |-- prompts.py                 Vendor-neutral prompts + tool schema
 |           `-- anthropic_provider.py      Anthropic SDK impl
-|-- tests/                                 28 tests across pdf/regex/validate/routes
-|-- eval/                                  Eval harness + golden PDFs
+|-- frontend/                              Streamlit UI (new in v2)
+|   |-- app.py                             Single-file Streamlit app
+|   `-- README.md
+|-- tests/                                 32 tests across pdf/regex/validate/routes/providers
+|-- eval/
+|   |-- generate_synthetic_pdfs.py         NEW v2: regenerates synthetic PDFs
+|   `-- golden/
+|       |-- leland_stanford.{pdf,json}        v1
+|       |-- short_term_policy.{pdf,json}      v2 — synthetic, format variety
+|       `-- missing_fields_policy.{pdf,json}  v2 — synthetic, null-over-guess test
 |-- sample/leland_stanford_policy.pdf      Sample for demo
 `-- docs/
     |-- architecture.md
     |-- design_rationale.md
-    `-- sample_summary.md
+    |-- sample_summary.md
+    `-- deploy.md                          NEW v2: Railway walkthrough
 ```
 
 ## Tests
 
 The test suite covers `app/pdf.py` (6 tests), `app/extractors/regex.py` (7),
-`app/validate.py` (6), and the FastAPI routes (9) for 28 tests total. The
-route tests use a mock `LLMProvider` so CI doesn't burn API calls, and the
-integration test confirms end-to-end that `POST /documents` against the
-Leland Stanford PDF returns `policy_number = "VF99999990"`. Run with:
+`app/validate.py` (6), and the FastAPI routes (9) for 32 tests (28 v1 + 4 v2
+OpenAI provider tests). The route tests use a mock `LLMProvider` so CI doesn't
+burn API calls; the v2 OpenAI provider tests use `respx` to mock the HTTP
+layer. The integration test confirms end-to-end that `POST /documents` against
+the Leland Stanford PDF returns `policy_number = "VF99999990"`. Run with:
 
 ```bash
 pytest tests/ -v
@@ -269,6 +329,7 @@ pytest tests/ -v
 - [docs/architecture.md](docs/architecture.md) — mermaid diagram, per-module breakdown, database schema, request lifecycle, error handling
 - [docs/design_rationale.md](docs/design_rationale.md) — ~3000 words organized by the brief's "Technical Considerations" headings; each subsection has a decision, trade-off table, production trade-off, and an interview Q&A
 - [docs/sample_summary.md](docs/sample_summary.md) — example Markdown summary output on the Leland Stanford sample
+- [docs/deploy.md](docs/deploy.md) — Railway deploy walkthrough, env vars, free-tier limitations
 
 ## License
 

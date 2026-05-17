@@ -1,0 +1,18 @@
+{
+  "case_name": "missing_fields_policy",
+  "pdf_filename": "missing_fields_policy.pdf",
+  "description": "Synthetic 1-page preliminary binder from a fictional 'Acme Insurance Services'. Intentionally missing expiration_date and exclusions to test 'null over guess' extraction behavior.",
+  "expected": {
+    "policy_number": "PB-202401",
+    "insured_name": "John Smith",
+    "insurer_name": "Acme Insurance Services",
+    "policy_type": "Whole Life",
+    "effective_date": "2024-03-01",
+    "expiration_date": null,
+    "premium_amount": 125.50,
+    "premium_frequency": "monthly",
+    "premium_currency": "USD",
+    "face_amount": 100000.00,
+    "exclusions_must_include_substrings": []
+  }
+}
