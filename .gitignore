@@ -30,3 +30,6 @@ storage/pdfs/*
 # Build
 dist/
 build/
+
+# Claude Code worktree scratch space (parallel agent isolation)
+.claude/

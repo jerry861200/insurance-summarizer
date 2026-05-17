@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     storage_dir: str = "./storage/pdfs"
     max_pdf_mb: int = 20
     environment: Literal["dev", "prod"] = "dev"
+    # Opt-in cross-model verification: when True, AND both keys are set, the
+    # pipeline runs a second LLM after the primary and surfaces scalar-field
+    # disagreements as ValidationWarnings. See app/extractors/llm/verifier.py.
+    cross_model_verify: bool = False
 
 
 @lru_cache

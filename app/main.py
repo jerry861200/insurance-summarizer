@@ -22,10 +22,17 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
+        active_model = (
+            settings.anthropic_model
+            if settings.llm_provider == "anthropic"
+            else settings.openai_model
+        )
         return {
             "status": "ok",
             "environment": settings.environment,
-            "model": settings.anthropic_model,
+            "provider": settings.llm_provider,
+            "model": active_model,
+            "cross_model_verify": settings.cross_model_verify,
         }
 
     try:
