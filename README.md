@@ -125,8 +125,8 @@ specific path in this repo.
 
 ### 1. Questions I'd ask before designing
 
-Senior move: don't draw the architecture cold. Pin down 4 things that
-materially change the shape:
+Don't draw the architecture cold. Pin down 4 things that materially change
+the shape:
 
 1. **Volume:** 10/day or 100k/day? → sync vs async; SQLite vs Postgres.
 2. **Latency tolerance:** result inline, or "we'll email you in 5 min"? → 201 immediate vs 202 + poll.
@@ -147,7 +147,7 @@ decisions flip with it.
 ### 3. Why 2 LLM calls, not 3 or 1
 
 The "3 targeted calls" pattern (fields / exclusions / summary) is a defensible
-senior answer. We chose **2 calls** — one combined extraction (fields + exclusions
+textbook answer. We chose **2 calls** — one combined extraction (fields + exclusions
 + coverage_limits via Anthropic `tool_use`) plus one summary:
 
 | | 1 mega-call | **2 (ours)** | 3 targeted |
@@ -199,7 +199,7 @@ The principle: **a NOT is a documented decision with a trigger condition, not a 
 
 ### 7. Topics I'd raise before the interviewer asks
 
-The questions a senior reviewer always lands on:
+The questions a reviewer always lands on:
 
 1. **Cost at scale.** 2 LLM calls × $0.01-0.10/doc. At 100k/mo = mid-4-figures. → Cache by `pdf_sha256` (already indexed, dedupes re-uploads); demote summary to Haiku 4.5; turn on prompt caching for the system prompt.
 2. **Hallucination beyond schema validation.** Pydantic catches format errors; source-grounding (`validate.py`) + cross-model verifier (v3) catches value errors. Production also wants: regex confirm of policy-number patterns, dictionary check of insurer name against a known list (NAIC registry).
