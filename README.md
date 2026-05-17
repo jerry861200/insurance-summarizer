@@ -89,18 +89,17 @@ breakdown, database schema, and request lifecycle.
 The verbal frame I'd use to walk an interviewer through this project.
 
 **Reading lens — this `main` README is v1 (1.5h take-home).** Each subsection
-names a senior-grade target answer (what an experienced engineer would design
-given unlimited time). v1 ships a deliberate subset of that target under the
-time budget. **Most of the gap was closed in v2 + v3 iterations** (currently in
-PR #2 against this branch). Where v3 caught up, I note it inline as
-**"→ Caught up in v3 (PR #2): …"**. Where v1's choice was deliberate (not
+names the target answer I'd build with more time, then what v1 actually shipped
+under the time budget. **Most of the gap was closed in v2 + v3 iterations**
+(currently in PR #2 against this branch). Where v3 caught up, I note it inline
+as **"→ Caught up in v3 (PR #2): …"**. Where v1's choice was deliberate (not
 time-pressed) and still holds, I note **"→ Trigger not fired"** with the
 milestone condition.
 
 ### 1. Questions I'd ask before designing
 
-Senior move: don't draw the architecture cold. Pin down 4 things that
-materially change the shape:
+Don't draw the architecture cold. Pin down 4 things that materially change
+the shape:
 
 1. **Volume:** 10/day or 100k/day? → sync vs async; SQLite vs Postgres.
 2. **Latency tolerance:** result inline, or "we'll email you in 5 min"? → 201 immediate vs 202 + poll.
@@ -118,16 +117,16 @@ decisions flip with it.
 2. **Exclusions are nested legal text, not a scalar.** Format varies by insurer; exact-match scoring is brittle. v1 stores them as `list[str]`; semantic eval is on the roadmap. → Caught up in v3 (PR #2): LLM-as-judge in `eval/judge.py` scores them semantically.
 3. **Documents are heterogeneous.** Different insurers, different layouts, different field labels. Pure regex doesn't scale; pure LLM hallucinates on novel formats. → Hybrid (D3).
 
-### 3. LLM call strategy — 3 calls is the senior answer; v1 ships 2
+### 3. LLM call strategy — 3 calls is the textbook answer; v1 ships 2
 
-**Senior target:** 3 targeted calls (fields / exclusions / summary). Each call
-gets its own focused schema; one failure doesn't take down the others; summary
+**Target:** 3 targeted calls (fields / exclusions / summary). Each call gets
+its own focused schema; one failure doesn't take down the others; summary
 prompt can't contaminate extraction.
 
 **v1 shipped (2 calls):** one combined extraction (fields + exclusions +
 coverage_limits via Anthropic `tool_use`) plus one summary. Reasoning at MVP scope:
 
-| | 1 mega-call | **v1: 2 (bundled)** | Senior target: 3 |
+| | 1 mega-call | **v1: 2 (bundled)** | Target: 3 |
 |---|---|---|---|
 | API cost / latency | 1× | 2× | 3× |
 | Reliability — one call fails, others survive | ❌ | ✅ | ✅ |
@@ -141,36 +140,36 @@ Why we bundled exclusions WITH fields at v1 — and why it might be permanent:
 - A third call re-feeds the same several-thousand-token `full_text` for marginal quality gain on current eval cases.
 - **→ Caught up in v3 (PR #2):** LLM-as-judge (`eval/judge.py`) scores exclusions **semantically at eval time**, so they're evaluated as a separate field even though they're extracted in the same runtime call. This gets us the isolation benefit without paying the third API call at runtime.
 
-### 4. Hallucination defense — writeup says "Pydantic MVP + prod adds verifier"; v1 shipped past MVP; v3 caught up to writeup prod
+### 4. Hallucination defense — target is "Pydantic MVP + prod adds verifier"; v1 shipped past MVP; v3 caught up to the prod target
 
-**Senior target:** Pydantic schema validation at MVP; production adds a
-second-pass validator (regex confirm patterns, dictionary lookup of insurer
-names, cross-model verify).
+**Target:** Pydantic schema validation at MVP; production adds a second-pass
+validator (regex confirm patterns, dictionary lookup of insurer names,
+cross-model verify).
 
-**v1 already past writeup MVP — 2 layers shipped:**
+**v1 already past the MVP target — 2 layers shipped:**
 
 1. **Anthropic `tool_use`** = API-level schema enforcement (better than Pydantic + retry — schema is enforced inside the API call, not wrapped after).
 2. **Source-grounding validation** (`app/validate.py`): every non-null scalar re-checked against `full_text` with normalized money/date candidates (`$500,000` ≡ `500000` ≡ `500,000.00`). Fields that don't ground → severity-warning + confidence drops to 0.55.
 
-**→ Caught up in v3 (PR #2) — third layer that writeup imagined for prod:**
+**→ Caught up in v3 (PR #2) — the third layer:**
 
 3. **Cross-model verifier** (`app/extractors/llm/verifier.py`), opt-in via `CROSS_MODEL_VERIFY=true`. Runs both providers, flags scalar disagreements as warnings. Cost is 2×; off by default until "real error rate > 1%" trigger fires.
 
 The system's stance on the LLM: **it's allowed to be wrong, just not silently.**
 
-### 5. API design — writeup wins on shape; v1 holds on sync
+### 5. API design — target wins on shape; v1 holds on sync
 
 Two API decisions worth calling out explicitly. They cut different ways.
 
-**5a. Per-field response shape — writeup is right; v1 hasn't migrated yet.**
+**5a. Per-field response shape — target is right; v1 hasn't migrated yet.**
 
-- **Senior target:** per-field envelope `{value, source, confidence}` so the client gets all provenance in one nested object per field.
+- **Target:** per-field envelope `{value, source, confidence}` so the client gets all provenance in one nested object per field.
 - **v1 shipped:** parallel dicts — `extracted_fields.X`, `confidence.X`, `extraction_method_per_field.X` — keyed by field name. Client cross-references 3-4 maps. This shape came from path-of-least-resistance (each is its own JSON column in SQLAlchemy).
 - **→ Partial catch-up in v3 (PR #2):** v3 fixed a silent v1/v2 bug where `confidence` and `extraction_method_per_field` were declared in `DocumentResponse` but never populated by `_document_to_response`. So v3 made the parallel dicts **actually carry data** — but didn't migrate the shape to a nested envelope. The migration is ~30min if a downstream consumer asks for it; nobody has.
 
 **5b. Sync vs async — v1 chose deliberately and still holds.**
 
-- **Senior target (writeup):** POST returns 202 + poll_url, "to leave room for async even if MVP runs sync."
+- **Target:** POST returns 202 + poll_url, "to leave room for async even if MVP runs sync."
 - **v1 shipped:** POST returns 201 + complete result, fully sync (D8).
 - **→ Trigger not fired (M5):** 1 broker, 1 PDF, 10-30s wall-clock is well below polling friction. A poll endpoint that always returns immediately = wasted complexity. Async/Celery requires Redis. Trigger condition: >10 docs/min sustained, or 30+ page documents become common. Until then, sync is right even with infinite time.
 
@@ -215,7 +214,7 @@ are genuinely production-only or trigger-conditional.
 
 ### 8. Topics I'd raise before the interviewer asks
 
-The questions a senior reviewer always lands on:
+The questions a reviewer always lands on:
 
 1. **Cost at scale.** 2 LLM calls × $0.01-0.10/doc. At 100k/mo = mid-4-figures. → Cache by `pdf_sha256` (already indexed, dedupes re-uploads); demote summary to a cheaper model; turn on prompt caching for the system prompt.
 2. **Hallucination — three layers, not one.** Schema (`tool_use`) catches format; source-grounding (`validate.py`) catches value errors against the source text. **→ Caught up in v3 (PR #2):** cross-model verifier for the long tail. Production also wants: regex confirm of policy-number patterns, dictionary check of insurer name against NAIC registry.
