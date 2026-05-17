@@ -86,9 +86,16 @@ breakdown, database schema, and request lifecycle.
 
 ## Interview Presentation (60-min flow)
 
-The verbal frame I'd use to walk an interviewer through this project — what
-I'd ask, frame, decide, and proactively raise. Every claim ties back to a
-specific path in this repo.
+The verbal frame I'd use to walk an interviewer through this project.
+
+**Reading lens — this `main` README is v1 (1.5h take-home).** Each subsection
+names a senior-grade target answer (what an experienced engineer would design
+given unlimited time). v1 ships a deliberate subset of that target under the
+time budget. **Most of the gap was closed in v2 + v3 iterations** (currently in
+PR #2 against this branch). Where v3 caught up, I note it inline as
+**"→ Caught up in v3 (PR #2): …"**. Where v1's choice was deliberate (not
+time-pressed) and still holds, I note **"→ Trigger not fired"** with the
+milestone condition.
 
 ### 1. Questions I'd ask before designing
 
@@ -108,83 +115,122 @@ decisions flip with it.
 ### 2. The problem isn't "PDF → JSON" — it's three things
 
 1. **Hallucination is a legal risk, not a UX bug.** A wrong `premium_amount` becomes a wrong number on a broker's screen, which becomes the wrong figure in a quote. The whole system is shaped around "always verify, always trace back to source."
-2. **Exclusions are nested legal text, not a scalar.** Format varies by insurer; exact-match scoring is brittle. We store them as `list[str]` — semantic scoring is on the post-MVP roadmap (M4 / M12).
+2. **Exclusions are nested legal text, not a scalar.** Format varies by insurer; exact-match scoring is brittle. v1 stores them as `list[str]`; semantic eval is on the roadmap. → Caught up in v3 (PR #2): LLM-as-judge in `eval/judge.py` scores them semantically.
 3. **Documents are heterogeneous.** Different insurers, different layouts, different field labels. Pure regex doesn't scale; pure LLM hallucinates on novel formats. → Hybrid (D3).
 
-### 3. Why 2 LLM calls, not 3 or 1
+### 3. LLM call strategy — 3 calls is the senior answer; v1 ships 2
 
-The "3 targeted calls" pattern (fields / exclusions / summary) is a defensible
-senior answer. We chose **2 calls** — one combined extraction (fields + exclusions
-+ coverage_limits via Anthropic `tool_use`) plus one summary:
+**Senior target:** 3 targeted calls (fields / exclusions / summary). Each call
+gets its own focused schema; one failure doesn't take down the others; summary
+prompt can't contaminate extraction.
 
-| | 1 mega-call | **2 (ours)** | 3 targeted |
+**v1 shipped (2 calls):** one combined extraction (fields + exclusions +
+coverage_limits via Anthropic `tool_use`) plus one summary. Reasoning at MVP scope:
+
+| | 1 mega-call | **v1: 2 (bundled)** | Senior target: 3 |
 |---|---|---|---|
-| API cost | 1× | 2× | 3× |
+| API cost / latency | 1× | 2× | 3× |
 | Reliability — one call fails, others survive | ❌ | ✅ | ✅ |
-| Schema enforcement | one giant schema | one focused tool-use schema | three small schemas |
+| Schema enforcement | one giant schema | one focused `tool_use` schema | three small schemas |
 | Summary contamination from extraction prompt | yes | no | no |
 | Debug "which step broke?" | hard | easy | easiest |
 
-Why bundle exclusions WITH fields (not as a third call):
+Why we bundled exclusions WITH fields at v1 — and why it might be permanent:
 
-- Anthropic `tool_use` enforces schema at the API layer — one `save_policy_fields` tool with `exclusions: array<string>` is the same reliability story as a separate call, at ~2/3× the latency.
-- A third call would re-feed the same several-thousand-token `full_text` to the LLM for marginal quality gain.
-- If exclusions later need semantic scoring against ground truth, that's an eval-harness concern (M4), not a runtime architecture concern.
+- `tool_use` enforces schema at the API layer. The reliability argument for splitting (one call fails, others survive) is mostly absorbed by API-level enforcement.
+- A third call re-feeds the same several-thousand-token `full_text` for marginal quality gain on current eval cases.
+- **→ Caught up in v3 (PR #2):** LLM-as-judge (`eval/judge.py`) scores exclusions **semantically at eval time**, so they're evaluated as a separate field even though they're extracted in the same runtime call. This gets us the isolation benefit without paying the third API call at runtime.
 
-### 4. Hallucination defense
+### 4. Hallucination defense — writeup says "Pydantic MVP + prod adds verifier"; v1 shipped past MVP; v3 caught up to writeup prod
 
-Today: **one layer shipped, second layer is roadmap (M12).**
+**Senior target:** Pydantic schema validation at MVP; production adds a
+second-pass validator (regex confirm patterns, dictionary lookup of insurer
+names, cross-model verify).
 
-1. **Source-grounding validation** (`app/validate.py`): every non-null scalar field is re-checked against `full_text` with normalized money/date candidates (`$500,000` ≡ `500000` ≡ `500,000.00`). Fields that don't ground → severity-warning + confidence drops to 0.55.
-2. **Per-field confidence + origin tracking**: every field carries `confidence[field]` and `extraction_method_per_field[field]` (`regex` / `llm` / `merged`) in the DB, so a downstream consumer can rank by provenance — not just by value.
-3. **Roadmap — cross-model verifier (M12)**: run a second cheap model on the same text and flag scalar disagreements. Currently off because the trigger is "real error rate > 1%" — we're ~0% on the 1 eval case. Engineering cost is modest because (D12) the `LLMProvider` Protocol already allows a second vendor without pipeline changes.
+**v1 already past writeup MVP — 2 layers shipped:**
+
+1. **Anthropic `tool_use`** = API-level schema enforcement (better than Pydantic + retry — schema is enforced inside the API call, not wrapped after).
+2. **Source-grounding validation** (`app/validate.py`): every non-null scalar re-checked against `full_text` with normalized money/date candidates (`$500,000` ≡ `500000` ≡ `500,000.00`). Fields that don't ground → severity-warning + confidence drops to 0.55.
+
+**→ Caught up in v3 (PR #2) — third layer that writeup imagined for prod:**
+
+3. **Cross-model verifier** (`app/extractors/llm/verifier.py`), opt-in via `CROSS_MODEL_VERIFY=true`. Runs both providers, flags scalar disagreements as warnings. Cost is 2×; off by default until "real error rate > 1%" trigger fires.
 
 The system's stance on the LLM: **it's allowed to be wrong, just not silently.**
 
-### 5. Trade-offs at a glance
+### 5. API design — writeup wins on shape; v1 holds on sync
 
-| Axis | Choice | Trade-off accepted |
+Two API decisions worth calling out explicitly. They cut different ways.
+
+**5a. Per-field response shape — writeup is right; v1 hasn't migrated yet.**
+
+- **Senior target:** per-field envelope `{value, source, confidence}` so the client gets all provenance in one nested object per field.
+- **v1 shipped:** parallel dicts — `extracted_fields.X`, `confidence.X`, `extraction_method_per_field.X` — keyed by field name. Client cross-references 3-4 maps. This shape came from path-of-least-resistance (each is its own JSON column in SQLAlchemy).
+- **→ Partial catch-up in v3 (PR #2):** v3 fixed a silent v1/v2 bug where `confidence` and `extraction_method_per_field` were declared in `DocumentResponse` but never populated by `_document_to_response`. So v3 made the parallel dicts **actually carry data** — but didn't migrate the shape to a nested envelope. The migration is ~30min if a downstream consumer asks for it; nobody has.
+
+**5b. Sync vs async — v1 chose deliberately and still holds.**
+
+- **Senior target (writeup):** POST returns 202 + poll_url, "to leave room for async even if MVP runs sync."
+- **v1 shipped:** POST returns 201 + complete result, fully sync (D8).
+- **→ Trigger not fired (M5):** 1 broker, 1 PDF, 10-30s wall-clock is well below polling friction. A poll endpoint that always returns immediately = wasted complexity. Async/Celery requires Redis. Trigger condition: >10 docs/min sustained, or 30+ page documents become common. Until then, sync is right even with infinite time.
+
+### 6. Trade-offs at a glance (with v3 status)
+
+| Axis | v1 choice | v3 status (PR #2) |
 |---|---|---|
-| Extraction | Hybrid regex + LLM (D3) | More code than pure-LLM; regex needs maintenance per new format |
-| LLM call shape | `tool_use` w/ schema | Provider-specific quirks; mitigated by `LLMProvider` Protocol (D11) |
-| Vendor | Anthropic only today, but abstracted (D11) | Pipeline never imports Anthropic SDK; swapping vendors is a new file in `extractors/llm/` |
-| API model | Sync 201 | Caller blocks 10-30s; not viable past ~10 docs/min sustained (M5 trigger) |
-| Storage | SQLite + local FS (D9) | Single-node; URL-swap to Postgres + S3 when multi-tenant (M6) |
-| Schema shape | Typed columns + JSON blob (D4) | Two query paths; pays back when new schema fields land mid-flight |
-| Versioning | Append-only `processing_runs` (D7) | More storage; pays back the moment we change prompt or model |
-| Summary | Templated abstractive (D5) | LLM call cost; pays back vs unreadable extractive legalese |
-| Eval | Mini harness, 1 hand-labeled case (D10) | One case ≠ proof; pays back as the framework to expand into M4 |
-| Tests | Real tests, mocked LLM (D11... numbering aside) | Setup complexity; pays back at every regression |
+| Extraction | Hybrid regex + LLM (D3) | Unchanged — works |
+| LLM call shape | `tool_use` w/ schema | Unchanged — works |
+| Vendor | Anthropic-only, abstracted via `LLMProvider` Protocol (D11) | **OpenAI swap** (v1.1 in PR #1) + **cross-model verifier** (v3) |
+| API model | Sync 201 (D8) | Unchanged — M5 trigger not fired |
+| API per-field shape | Parallel dicts | **Silent bug fixed** (fields now actually populated); envelope migration still open |
+| Storage | SQLite + local FS (D9) | Unchanged — M6 trigger not fired; **+ Dockerfile** for any-env deploy |
+| Schema shape | Typed columns + JSON blob (D4) | Unchanged |
+| Versioning | Append-only `processing_runs` (D7) | Unchanged |
+| Summary | Templated abstractive (D5) | Unchanged |
+| Source attribution in UI | None (Swagger only) | **"📄 p.N" badges + PDF Preview tab** |
+| Eval | 1 hand-labeled case (D10) | **6 cases (1 real + 5 synthetic) + LLM-as-judge + CI regression gate** |
+| Frontend | Swagger + curl only | **Streamlit UI** (v2); + batch upload (v3) |
+| Tests | 28, mocked LLM | **52** (+verifier, +judge, +frontend smoke) |
 
 (D-numbers reference the "Design Decisions" section below.)
 
-### 6. What I deliberately did NOT do (and why)
+### 7. What v1 deliberately did NOT do (and what v3 did about it)
 
-Three categories, each with a clear shape:
+| Item | v1 reason for deferring | v3 status |
+|---|---|---|
+| Cross-model verifier (M12) | Writeup right; deferred — engineering ready via D11, no real error signal | ✅ Shipped opt-in via `CROSS_MODEL_VERIFY=true` |
+| CI eval gate (M13) | Writeup right; needs eval corpus expansion first | ✅ Shipped (`.github/workflows/ci.yml`, 30% regex baseline floor) |
+| Source attribution UI (M14) | Writeup right; full PDF.js bounding-box ~3h — bigger than v1 budget | ⚠️ Partial — page-level badges shipped; span-level still deferred |
+| Streamlit / web UI | Writeup right; Swagger + curl is enough for demo, UI is a separate iteration | ✅ Shipped (v2) |
+| Real ACORD/COI eval corpus (M4) | Writeup right; couldn't fetch external sources | ⚠️ Partial — 5 diverse synthetic cases; real corpus deferred |
+| Multi-vendor LLM (D11 promise) | Writeup right; abstraction was scaffolded but only one provider shipped | ✅ OpenAI provider shipped (v1.1 in PR #1) |
+| Auth + RBAC (M1) | Production-only; no real users yet | ❌ Still deferred — no real users |
+| Postgres + S3 (M6) | Production-only; 1-line URL swap | ❌ Still deferred — trigger not fired |
+| Async / Celery (M5) | Sync is right at MVP scale | ❌ Still deferred — trigger not fired |
+| PII redaction (M19) | Production-only; no real PII in demo | ❌ Still deferred — no real PII |
 
-- **Production-only with documented milestone trigger:** Auth (M1), Postgres+S3 (M6), async/Celery (M5), per-insurer prompt routing (M8), PII redaction (M19).
-- **Wrong-shape at MVP scale:** htmx/React UI (Swagger + curl is the demo surface; UI is a separate iteration), vector RAG (14-page docs fit in 5K tokens), streaming responses (extraction isn't chat-shaped).
-- **Right-shape, wrong-time:** cross-model verifier (M12 — engineering ready via D11 abstraction; deferred until we have a real error signal), CI eval gate (M13 — needs an expanded eval corpus first), real ACORD/COI labeled corpus (no labeled set available yet).
+**The principle:** every NOT is a documented decision with a trigger condition,
+not a silent omission. v3 closed the gap on most "deferred" items; the rest
+are genuinely production-only or trigger-conditional.
 
-The principle: **a NOT is a documented decision with a trigger condition, not a silent omission.** Full list in "What I'd Build Next" + "What's Out of Scope" below.
-
-### 7. Topics I'd raise before the interviewer asks
+### 8. Topics I'd raise before the interviewer asks
 
 The questions a senior reviewer always lands on:
 
 1. **Cost at scale.** 2 LLM calls × $0.01-0.10/doc. At 100k/mo = mid-4-figures. → Cache by `pdf_sha256` (already indexed, dedupes re-uploads); demote summary to a cheaper model; turn on prompt caching for the system prompt.
-2. **Hallucination beyond schema validation.** Pydantic catches format errors; source-grounding (`validate.py`) catches value errors against the source text. Production also wants: regex confirm of policy-number patterns, dictionary check of insurer name against a known list (NAIC registry), and a cross-model verifier (M12) for the long tail.
-3. **Exclusions are deceptively hard.** Conditional ("except if…"), time-bound ("during the first 2 years…"), nested ("the exclusion in 5(a) does not apply when…"). MVP stores raw strings — good enough for human review, not enough for downstream reasoning. Production needs a domain-expert-designed taxonomy and a structured `Exclusion` row per clause.
-4. **PII + compliance.** Policies contain SSN, address, health information. Production: column-level encryption, access log, retention policy, geo-restricted storage (M2, M19).
-5. **How do you know it's correct?** Mini eval harness in repo: 1 hand-labeled case (Leland Stanford), per-field scoring with money / date tolerances. Single case isn't proof — it's the framework. M4 = expand to 50+ ACORD/COI/life/auto/home cases; M13 = gate CI on regression once the corpus exists.
+2. **Hallucination — three layers, not one.** Schema (`tool_use`) catches format; source-grounding (`validate.py`) catches value errors against the source text. **→ Caught up in v3 (PR #2):** cross-model verifier for the long tail. Production also wants: regex confirm of policy-number patterns, dictionary check of insurer name against NAIC registry.
+3. **Exclusions are deceptively hard.** Conditional ("except if…"), time-bound ("during the first 2 years…"), nested ("the exclusion in 5(a) does not apply when…"). v1 stores raw strings — fine for human review. **→ Caught up in v3 (PR #2):** LLM-as-judge scores semantic similarity at eval time. Production still wants: domain-expert taxonomy + structured `Exclusion` row per clause.
+4. **PII + compliance.** Policies contain SSN, address, health information. Production: column-level encryption, access log, retention policy, geo-restricted storage (M2, M19). Not in any iteration yet — production-only with clear trigger (first real customer).
+5. **How do you know it's correct?** v1: 1 hand-labeled case + per-field scoring with money/date tolerances — the framework. **→ Caught up in v3 (PR #2):** 6 cases, LLM-as-judge for free-text, CI regression gate at 30% baseline. Production target: 100+ hand-labeled ACORD/COI/life/auto/home; re-run on every prompt/model swap.
 
-### 8. One-line thesis
+### 9. One-line thesis
 
 **Treat the LLM as an unreliable contractor: every output needs evidence
 (source page), monitoring (confidence + warnings), and the ability to retry
 with a different model.** The architecture isn't about clever prompting — it's
 about systematically constraining where the LLM is allowed to be wrong
-silently.
+silently. v1 ships the constraint layer at MVP scope; v3 (PR #2) extends the
+same constraint thinking into UX, ops, and eval — same thesis, deeper coverage.
 
 ## Design Decisions
 
