@@ -2,7 +2,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Avoid a hard import cycle / make eval.metrics usable without eval.judge
+    # being importable (e.g. if someone strips the judge module in production).
+    from eval.judge import JudgeResult
+
+
+# A judge function takes (field_name, expected, actual) and returns a
+# JudgeResult. The eval harness constructs concrete instances of this via
+# `eval.judge.judge_semantic_similarity` bound to an LLMProvider; tests
+# inject a fake judge so no real API calls are made.
+JudgeFn = Callable[[str, str, str], "JudgeResult"]
 
 
 @dataclass
@@ -108,9 +120,55 @@ def compare_substrings(field: str, must_include: list[str], actual_list: list[st
                        f"missing: {missing}")
 
 
-def evaluate_case(expected: dict, actual: dict, case_name: str) -> CaseResult:
+def compare_semantic(field: str, expected, actual, judge_fn: JudgeFn) -> FieldResult:
+    """Compare expected vs actual using an LLM-as-judge for free-text fields.
+
+    Use this for fields where exact-match and substring-match are too brittle:
+    summary_markdown, exclusion clauses, narrative descriptions. Numeric
+    fields, dates, policy numbers, etc. should keep using their dedicated
+    comparators (compare_money/compare_date/compare_string).
+
+    The threshold for "passed" is 0.75 - matches the JUDGE_PROMPT scoring
+    guide where 0.75 means "mostly same, minor missing detail".
+
+    Args:
+        field: name of the field being judged.
+        expected: gold value (None signals both-must-be-None to pass).
+        actual: extracted value.
+        judge_fn: callable (field, expected, actual) -> JudgeResult. Tests
+            inject a stub so the comparator can be exercised without making
+            real LLM calls.
+    """
+    if actual is None or expected is None:
+        passed = expected is None and actual is None
+        return FieldResult(
+            field, expected, actual, passed, 1.0 if passed else 0.0,
+            note=("both null" if passed else "value missing"),
+        )
+    judge_result = judge_fn(field, str(expected), str(actual))
+    passed = judge_result.score >= 0.75
+    return FieldResult(
+        field, expected, actual, passed, judge_result.score,
+        note=f"judge: {judge_result.reason}",
+    )
+
+
+def evaluate_case(
+    expected: dict,
+    actual: dict,
+    case_name: str,
+    judge_fn: JudgeFn | None = None,
+) -> CaseResult:
     """Compare an actual extraction against the expected ground truth.
-    Returns CaseResult with per-field FieldResult and overall stats."""
+
+    Returns CaseResult with per-field FieldResult and overall stats.
+
+    If a `judge_fn` is provided, free-text fields (exclusions joined, and
+    summary_markdown when present in the expected spec) get an additional
+    semantic-similarity score from the judge on top of the existing exact /
+    substring comparators. The judge results are appended as separate
+    FieldResult entries so the human reader can see BOTH signals.
+    """
     results: list[FieldResult] = []
 
     string_fields = ["policy_number", "insured_name", "insurer_name", "policy_type", "premium_frequency", "premium_currency"]
@@ -134,6 +192,29 @@ def evaluate_case(expected: dict, actual: dict, case_name: str) -> CaseResult:
             expected["exclusions_must_include_substrings"],
             actual.get("exclusions") or [],
         ))
+
+    # Optional LLM-as-judge pass for free-text fields. Only runs when caller
+    # passes a judge_fn (e.g. eval.run_eval --judge). The substring check
+    # above is the floor; semantic similarity is an additional dimension.
+    if judge_fn is not None:
+        actual_exclusions = actual.get("exclusions") or []
+        expected_substrings = expected.get("exclusions_must_include_substrings") or []
+        # Only judge when both sides have something to compare. An empty
+        # substring list still means "no specific phrases required", so we
+        # skip the judge for it (otherwise we'd score noise).
+        if actual_exclusions and expected_substrings:
+            expected_text = "; ".join(expected_substrings)
+            actual_text = "; ".join(str(x) for x in actual_exclusions)
+            results.append(compare_semantic(
+                "exclusions_semantic", expected_text, actual_text, judge_fn,
+            ))
+
+        expected_summary = expected.get("expected_summary")
+        actual_summary = actual.get("summary_markdown")
+        if expected_summary is not None:
+            results.append(compare_semantic(
+                "summary_markdown", expected_summary, actual_summary, judge_fn,
+            ))
 
     overall_score = sum(r.score for r in results) / len(results) if results else 0.0
     overall_passed = all(r.passed for r in results)
