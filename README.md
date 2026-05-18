@@ -21,6 +21,18 @@ swapping providers or models is a config change rather than a refactor.
 >   UX (PDF preview + source page badges + batch upload), Accuracy (3 new
 >   synthetic cases + LLM-as-judge). 52 tests, eval at 6 cases.
 
+## Live demo
+
+- **Frontend (Streamlit UI):** https://frontend-production-1145.up.railway.app
+- **Backend API:** https://api-production-2f038.up.railway.app
+  ([`/healthz`](https://api-production-2f038.up.railway.app/healthz) ·
+  [`/docs` Swagger UI](https://api-production-2f038.up.railway.app/docs))
+
+Deployed on Railway (free tier — the backend may cold-start in ~30s if it has
+been idle). Configured with OpenAI `gpt-4o` and a hard spending cap; the
+service may be paused after the demo window — see [docs/deploy.md](docs/deploy.md)
+to redeploy.
+
 ## Quick Start
 
 ### Prerequisites
